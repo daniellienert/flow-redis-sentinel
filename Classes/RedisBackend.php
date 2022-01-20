@@ -30,7 +30,7 @@ use RuntimeException;
 /**
  * Class RedisBackend
  */
-class RedisBackend extends IndependentAbstractBackend implements TaggableBackendInterface, IterableBackendInterface, FreezableBackendInterface, PhpCapableBackendInterface, WithStatusInterface
+class RedisBackend extends IndependentAbstractBackend implements TaggableBackendInterface, IterableBackendInterface, PhpCapableBackendInterface, WithStatusInterface
 {
     use RequireOnceFromValueTrait;
 
@@ -117,18 +117,32 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
             throw new RuntimeException(sprintf('Cannot add or modify cache entry because the backend of cache "%s" is frozen.', $this->cacheIdentifier), 1574776976);
         }
 
-        $this->client->multi();
         $lifetime = $lifetime ?? $this->defaultLifetime;
-        if ($lifetime > 0) {
-            $status = $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
-        } else {
-            $status = $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data));
+
+        $setOptions = [];
+
+        $redisTags = array_reduce($tags, function ($redisTags, $tag) use ($lifetime, $entryIdentifier) {
+            $expire = $this->calculateExpires($this->getPrefixedIdentifier('tag:' . $tag), $lifetime);
+            $redisTags[] = ['key' => $this->getPrefixedIdentifier('tag:' . $tag), 'value' => $entryIdentifier, 'expire' => $expire];
+
+            $expire = $this->calculateExpires($this->getPrefixedIdentifier('tags:' . $entryIdentifier), $lifetime);
+            $redisTags[] = ['key' => $this->getPrefixedIdentifier('tags:' . $entryIdentifier), 'value' => $tag, 'expire' => $expire];
+            return $redisTags;
+        }, []);
+
+        $this->client->multi();
+
+        $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
+
+        foreach ($redisTags as $tag) {
+            $this->client->sAdd($tag['key'], $tag['value']);
+            if ($tag['expire'] > 0) {
+                $this->client->expire($tag['key'], $tag['expire']);
+            } else {
+                $this->client->persist($tag['key']);
+            }
         }
 
-        foreach ($tags as $tag) {
-            $this->client->sAdd($this->getPrefixedIdentifier('tag:' . $tag), [$entryIdentifier]);
-            $this->client->sAdd($this->getPrefixedIdentifier('tags:' . $entryIdentifier), [$tag]);
-        }
         $this->client->exec();
     }
 
@@ -176,7 +190,7 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
             $this->client->watch($tagsKey);
             $tags = $this->client->sMembers($tagsKey);
             $this->client->multi();
-                $this->client->del([$this->getPrefixedIdentifier('entry:' . $entryIdentifier)]);
+            $this->client->del([$this->getPrefixedIdentifier('entry:' . $entryIdentifier)]);
             foreach ($tags as $tag) {
                 $this->client->sRem($this->getPrefixedIdentifier('tag:' . $tag), $entryIdentifier);
             }
@@ -251,14 +265,11 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
         // language=lua
         $script = "
         local entries = redis.call('SMEMBERS', KEYS[1])
-        for k1,entryIdentifier in ipairs(entries) do
+        for _,entryIdentifier in ipairs(entries) do
             redis.call('DEL', ARGV[1]..'entry:'..entryIdentifier)
-            local tags = redis.call('SMEMBERS', ARGV[1]..'tags:'..entryIdentifier)
-            for k2,tagName in ipairs(tags) do
-                redis.call('SREM', ARGV[1]..'tag:'..tagName, entryIdentifier)
-            end
             redis.call('DEL', ARGV[1]..'tags:'..entryIdentifier)
         end
+        redis.call('DEL', KEYS[1])
         return #entries
         ";
 
@@ -321,38 +332,6 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
     public function rewind()
     {
         $this->getEntryKeyspaceIterator()->rewind();
-    }
-
-    /**
-     * Freezes this cache backend.
-     *
-     * All data in a frozen backend remains unchanged and methods which try to add
-     * or modify data result in an exception thrown. Possible expiry times of
-     * individual cache entries are ignored.
-     *
-     * A frozen backend can only be thawn by calling the flush() method.
-     *
-     * @return void
-     * @throws RuntimeException
-     */
-    public function freeze(): void
-    {
-        if ($this->isFrozen()) {
-            throw new RuntimeException(sprintf('Cannot add or modify cache entry because the backend of cache "%s" is frozen.', $this->cacheIdentifier), 1574777766);
-        }
-        do {
-            $entriesKey = $this->getPrefixedIdentifier('entries');
-            $this->client->watch($entriesKey);
-            $entries = $this->client->lRange($entriesKey, 0, -1);
-            $this->client->multi();
-            foreach ($entries as $entryIdentifier) {
-                $this->client->persist($this->getPrefixedIdentifier('entry:' . $entryIdentifier));
-            }
-            $this->client->set($this->getPrefixedIdentifier('frozen'), '1');
-            /** @var array|bool $result */
-            $result = $this->client->exec();
-        } while ($result === false);
-        $this->frozen = true;
     }
 
     /**
@@ -530,6 +509,15 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
             $this->entryKeyspaceIteratorKeyPrefixLength = strlen($this->getPrefixedIdentifier('entry')) + 1;
         }
         return $this->entryKeyspaceIterator;
+    }
+
+    private function calculateExpires(string $tag, int $lifetime): int
+    {
+        $ttl = $this->client->ttl($tag);
+        if ($ttl < 0 || $lifetime === self::UNLIMITED_LIFETIME) {
+            return -1;
+        }
+        return max($ttl, $lifetime);
     }
 
 }

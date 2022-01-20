@@ -172,13 +172,12 @@ class RedisBackendTest extends BaseTestCase
         for ($i = 10; $i < 20; $i++) {
             $this->backend->set('entry_' . $i, 'foo', ['tag2']);
         }
-        self::assertCount(10, $this->backend->findIdentifiersByTag('tag1'));
-        self::assertCount(20, $this->backend->findIdentifiersByTag('tag2'));
+        self::assertCount(10, $this->backend->findIdentifiersByTag('tag1'), 'entries with tag1');
+        self::assertCount(20, $this->backend->findIdentifiersByTag('tag2'), 'entries with tag2');
 
         $count = $this->backend->flushByTag('tag1');
         self::assertEquals(10, $count, 'flushByTag returns amount of flushed entries');
-        self::assertCount(0, $this->backend->findIdentifiersByTag('tag1'));
-        self::assertCount(10, $this->backend->findIdentifiersByTag('tag2'));
+        self::assertCount(0, $this->backend->findIdentifiersByTag('tag1'), 'entries with tag1 after flush');
     }
 
     /**
