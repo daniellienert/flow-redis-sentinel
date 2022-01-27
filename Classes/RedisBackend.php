@@ -117,7 +117,9 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
             throw new RuntimeException(sprintf('Cannot add or modify cache entry because the backend of cache "%s" is frozen.', $this->cacheIdentifier), 1574776976);
         }
 
-        $lifetime = $lifetime ?? $this->defaultLifetime;
+        if ((int)$lifetime === 0) {
+            $lifetime = $this->defaultLifetime;
+        }
 
         $setOptions = [];
 
@@ -132,7 +134,11 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
 
         $this->client->multi();
 
-        $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
+        if ($lifetime > 0) {
+            $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
+        } else {
+            $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data));
+        }
 
         foreach ($redisTags as $tag) {
             $this->client->sAdd($tag['key'], $tag['value']);
