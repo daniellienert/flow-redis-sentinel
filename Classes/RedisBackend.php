@@ -117,34 +117,18 @@ class RedisBackend extends IndependentAbstractBackend implements TaggableBackend
             throw new RuntimeException(sprintf('Cannot add or modify cache entry because the backend of cache "%s" is frozen.', $this->cacheIdentifier), 1574776976);
         }
 
-        $setOptions = [];
-
-        $lifetime = $lifetime ?? $this->defaultLifetime;
-        
-        $redisTags = array_reduce($tags, function ($redisTags, $tag) use ($lifetime, $entryIdentifier) {
-            $expire = $this->calculateExpires($this->getPrefixedIdentifier('tag:' . $tag), $lifetime);
-            $redisTags[] = ['key' => $this->getPrefixedIdentifier('tag:' . $tag), 'value' => $entryIdentifier, 'expire' => $expire];
-
-            $expire = $this->calculateExpires($this->getPrefixedIdentifier('tags:' . $entryIdentifier), $lifetime);
-            $redisTags[] = ['key' => $this->getPrefixedIdentifier('tags:' . $entryIdentifier), 'value' => $tag, 'expire' => $expire];
-            return $redisTags;
-        }, []);
-
         $this->client->multi();
+        $lifetime = $lifetime ?? $this->defaultLifetime;
 
         if ($lifetime > 0) {
-            $status = $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
+            $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data), 'ex', $lifetime);
         } else {
-            $status = $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data));
+            $this->client->set($this->getPrefixedIdentifier('entry:' . $entryIdentifier), $this->compress($data));
         }
 
-        foreach ($redisTags as $tag) {
-            $this->client->sAdd($tag['key'], $tag['value']);
-            if ($tag['expire'] > 0) {
-                $this->client->expire($tag['key'], $tag['expire']);
-            } else {
-                $this->client->persist($tag['key']);
-            }
+        foreach ($tags as $tag) {
+            $this->client->sAdd($this->getPrefixedIdentifier('tag:' . $tag), [$entryIdentifier]);
+            $this->client->sAdd($this->getPrefixedIdentifier('tags:' . $entryIdentifier), [$tag]);
         }
 
         $this->client->exec();
